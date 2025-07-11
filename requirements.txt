@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+PyMuPDF
+pdfminer.six
+pdf2image
+pytesseract
+Pillow
+python-dotenv
+openai 
+whisper
+pydub 

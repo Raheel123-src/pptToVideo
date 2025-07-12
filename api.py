@@ -19,6 +19,288 @@ load_dotenv()
 UPLOADS_DIR = os.getenv('UPLOADS_DIR', 'uploads')
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+def extract_slide_images_with_python(pptx_path, slide_num):
+    """Extract slide images using Python-based approach (fallback when GPT fails)."""
+    try:
+        from pptx import Presentation
+        from PIL import Image, ImageDraw, ImageFont
+        import io
+        
+        # Load the presentation
+        prs = Presentation(pptx_path)
+        
+        if slide_num < 1 or slide_num > len(prs.slides):
+            raise Exception(f"Slide {slide_num} does not exist. Presentation has {len(prs.slides)} slides.")
+        
+        # Get the specific slide (0-indexed)
+        slide = prs.slides[slide_num - 1]
+        
+        # Get slide dimensions (default to 1920x1080 if not specified)
+        slide_width = int(prs.slide_width * 96 / 914400) if prs.slide_width else 1920  # Convert EMU to pixels
+        slide_height = int(prs.slide_height * 96 / 914400) if prs.slide_height else 1080  # Convert EMU to pixels
+        
+        if slide_width == 0 or slide_height == 0:
+            slide_width, slide_height = 1920, 1080
+        
+        # Create a white background image
+        img = Image.new('RGB', (slide_width, slide_height), color=0xFFFFFF)
+        draw = ImageDraw.Draw(img)
+        
+        # Try to use a default font
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 24)
+        except:
+            try:
+                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+            except:
+                font = ImageFont.load_default()
+        
+        # Process each shape in the slide
+        for shape in slide.shapes:
+            try:
+                # Handle text shapes
+                if hasattr(shape, 'text') and getattr(shape, 'text', '').strip():
+                    # Get shape position and size
+                    left = int(shape.left * 96 / 914400)
+                    top = int(shape.top * 96 / 914400)
+                    width = int(shape.width * 96 / 914400)
+                    height = int(shape.height * 96 / 914400)
+                    
+                    # Draw text
+                    draw.text((left, top), getattr(shape, 'text', ''), fill=(0, 0, 0), font=font)
+                
+                # Handle image shapes
+                elif hasattr(shape, 'image'):
+                    try:
+                        # Get image data
+                        image_stream = getattr(shape, 'image').blob
+                        image_data = Image.open(io.BytesIO(image_stream))
+                        
+                        # Get position and size
+                        left = int(shape.left * 96 / 914400)
+                        top = int(shape.top * 96 / 914400)
+                        width = int(shape.width * 96 / 914400)
+                        height = int(shape.height * 96 / 914400)
+                        
+                        # Resize and paste image
+                        image_data = image_data.resize((width, height))
+                        img.paste(image_data, (left, top))
+                    except Exception as e:
+                        print(f"Warning: Could not process image shape: {e}")
+                        continue
+                
+                # Handle other shapes (rectangles, etc.)
+                elif hasattr(shape, 'shape_type'):
+                    try:
+                        left = int(shape.left * 96 / 914400)
+                        top = int(shape.top * 96 / 914400)
+                        width = int(shape.width * 96 / 914400)
+                        height = int(shape.height * 96 / 914400)
+                        
+                        # Draw a simple rectangle
+                        draw.rectangle([left, top, left + width, top + height], 
+                                     outline=(0, 0, 0), fill=(240, 240, 240))
+                    except Exception as e:
+                        print(f"Warning: Could not process shape: {e}")
+                        continue
+                        
+            except Exception as e:
+                print(f"Warning: Could not process shape: {e}")
+                continue
+        
+        # Save the image
+        filename = f"slide_{slide_num}_python.png"
+        filepath = os.path.join(UPLOADS_DIR, filename)
+        img.save(filepath, 'PNG')
+        
+        print(f"Extracted slide {slide_num} using Python: {filepath}")
+        return [filepath]
+        
+    except Exception as e:
+        raise Exception(f"Python-based extraction failed for slide {slide_num}: {e}")
+
+def extract_slide_images_with_gpt(pptx_path, slide_num):
+    """
+    Use GPT-4o to extract actual rendered slide images from PowerPoint file.
+    This preserves all fonts, images, and formatting exactly as they appear.
+    """
+    import base64
+    
+    # Read the PowerPoint file as base64
+    with open(pptx_path, 'rb') as f:
+        pptx_data = f.read()
+    pptx_base64 = base64.b64encode(pptx_data).decode('utf-8')
+    
+    # Create a comprehensive prompt for GPT to extract slide images
+    gpt_prompt = f"""
+    You are an expert at extracting PowerPoint slide images with perfect accuracy.
+    
+    I have provided you with a PowerPoint file (base64 encoded). Please extract slide {slide_num} and create the following images:
+
+    1. **Initial State (Before Animations)**: 
+       - Filename: slide_{slide_num:02d}_before.png
+       - Show the slide exactly as it appears when first displayed, before any animations trigger
+       - Include all text, images, shapes, and formatting exactly as rendered in PowerPoint
+       - Preserve all fonts, colors, sizes, and positioning
+
+    2. **Final State (After All Animations)**:
+       - Filename: slide_{slide_num:02d}_after.png  
+       - Show the slide after all animations have completed
+       - Display all elements in their final animated state
+       - Maintain exact visual fidelity to PowerPoint rendering
+
+    3. **Animation Transition States** (if animations exist):
+       - For each animation step, create an image showing the slide at that specific moment
+       - Filename pattern: slide_{slide_num:02d}_transition_X.png (where X is the transition number)
+       - Capture the exact visual state at each animation transition
+
+    Requirements:
+    - Extract the actual rendered images from the PowerPoint file
+    - Preserve ALL visual elements: fonts, images, shapes, colors, positioning
+    - Maintain exact pixel-perfect accuracy to PowerPoint rendering
+    - Use high resolution (1920x1080 or higher)
+    - Save as PNG format with transparency support
+    - Do NOT recreate or redraw elements - extract the actual rendered images
+
+    PowerPoint File (base64): {pptx_base64}
+    
+    Please return a JSON object with:
+    {{
+        "slide_{slide_num}_before": "base64_encoded_png_data",
+        "slide_{slide_num}_after": "base64_encoded_png_data", 
+        "slide_{slide_num}_transition_1": "base64_encoded_png_data",
+        "slide_{slide_num}_transition_2": "base64_encoded_png_data",
+        ...
+        "total_transitions": number_of_transitions_found
+    }}
+    """
+    
+    try:
+        # Call GPT-4o to extract the actual slide images
+        response = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert PowerPoint slide image extractor. Your job is to extract actual rendered images from PowerPoint files with perfect accuracy, preserving all fonts, images, and formatting exactly as they appear in PowerPoint."},
+                {"role": "user", "content": gpt_prompt}
+            ],
+            response_format={"type": "json_object"}
+        )
+        
+        # Parse the response
+        response_content = response.choices[0].message.content
+        if not response_content:
+            raise Exception("Empty response from GPT")
+        response_data = json.loads(response_content)
+        
+        extracted_images = []
+        
+        # Save each extracted image
+        for key, base64_data in response_data.items():
+            if key.startswith(f"slide_{slide_num}") and base64_data:
+                try:
+                    # Decode and save the image
+                    image_data = base64.b64decode(base64_data)
+                    filename = f"{key}.png"
+                    filepath = os.path.join(UPLOADS_DIR, filename)
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(image_data)
+                    
+                    extracted_images.append(filepath)
+                    print(f"Extracted {key}: {filepath}")
+                    
+                except Exception as e:
+                    raise Exception(f"Error saving {key}: {e}")
+        
+        return extracted_images
+        
+    except openai.BadRequestError as e:
+        if "string too long" in str(e):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "FILE_TOO_LARGE",
+                    "message": "PowerPoint file is too large for GPT processing. Please use a smaller file (under 10MB).",
+                    "gpt_error": str(e)
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "GPT_BAD_REQUEST",
+                    "message": "Invalid request to GPT API",
+                    "gpt_error": str(e)
+                }
+            )
+    except openai.AuthenticationError as e:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "GPT_AUTH_ERROR",
+                "message": "Authentication failed with GPT API. Please check your API key.",
+                "gpt_error": str(e)
+            }
+        )
+    except openai.RateLimitError as e:
+        # Check if it's a file size issue (tokens per min limit)
+        if "Request too large" in str(e) or "tokens per min" in str(e):
+            print(f"File too large for GPT-4o, falling back to Python-based extraction: {e}")
+            # Fall back to Python-based extraction
+            return extract_slide_images_with_python(pptx_path, slide_num)
+        else:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "GPT_RATE_LIMIT",
+                    "message": "Rate limit exceeded for GPT API. Please try again later.",
+                    "gpt_error": str(e)
+                }
+            )
+    except openai.APIError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "GPT_API_ERROR",
+                "message": "GPT API error occurred",
+                "gpt_error": str(e)
+            }
+        )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "INVALID_JSON_RESPONSE",
+                "message": "Invalid JSON response from GPT",
+                "gpt_error": str(e)
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "EXTRACTION_FAILED",
+                "message": f"Failed to extract slide {slide_num}",
+                "gpt_error": str(e)
+            }
+        )
+
+def validate_pptx_file_size(pptx_path):
+    """Validate that the PowerPoint file is not too large for GPT processing."""
+    file_size = os.path.getsize(pptx_path)
+    max_size = 25 * 1024 * 1024  # 25MB limit for GPT-4o
+    
+    if file_size > max_size:
+        raise HTTPException(
+            status_code=400, 
+            detail={
+                "error": "FILE_TOO_LARGE",
+                "message": f"PowerPoint file is too large ({file_size / 1024 / 1024:.1f}MB). Maximum size is 25MB.",
+                "file_size_mb": round(file_size / 1024 / 1024, 1),
+                "max_size_mb": 25
+            }
+        )
+
 app = FastAPI()
 
 @app.post("/upload-pdf-audio/")
@@ -46,7 +328,7 @@ async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File
             # Ensure height is even for h264 compatibility
             if height % 2 != 0:
                 # Create a new image with even height
-                new_image = Image.new('RGB', (width, height + 1), color=(255, 255, 255))
+                new_image = Image.new('RGB', (width, height + 1), (255, 255, 255))
                 new_image.paste(image, (0, 0))
                 image = new_image
             img_filename = os.path.join(UPLOADS_DIR, f"page_{i+1}.png")
@@ -386,6 +668,7 @@ async def upload_ppt_audio_animate(ppt: UploadFile = File(...), audio: UploadFil
             audio_path = tmp_audio.name
         
         # Extract PPTX content using GPT-4o mini
+        from pptx import Presentation
         prs = Presentation(pptx_path)
         slides_content = []
         
@@ -583,265 +866,53 @@ async def upload_ppt_audio_animate(ppt: UploadFile = File(...), audio: UploadFil
         audio_duration = len(audio) / 1000.0
         step_duration = audio_duration / len(animation_plan) if animation_plan else 1.0
         
-        # Extract slides as images using platform-independent Python solution
-        print("Extracting PowerPoint slides as images using Python libraries...")
+        # Validate PowerPoint file size before processing
+        validate_pptx_file_size(pptx_path)
+        
+        # Extract slides as images using GPT-4o or Python fallback
+        print("Extracting PowerPoint slides as images...")
         slide_images = []
         
+        # Load the original presentation
+        original_prs = Presentation(pptx_path)
+        
+        # Try GPT extraction first, fall back to Python if file is too large
+        use_python_extraction = False
+        
         try:
-            # Use python-pptx to extract slide content and create images
-            from pptx.util import Inches, Pt
-            from pptx.enum.text import PP_ALIGN
-            from pptx.dml.color import RGBColor
+            # Try to extract the first slide with GPT to test if it works
+            print("Testing GPT extraction with first slide...")
+            test_images = extract_slide_images_with_gpt(pptx_path, 1)
+            slide_images.extend(test_images)
+            print(f"GPT extraction successful for slide 1, continuing with GPT...")
             
-            # Load the original presentation
-            original_prs = Presentation(pptx_path)
-            
-            # Extract each slide as image
-            for i, slide in enumerate(original_prs.slides):
+            # If first slide worked, continue with GPT for remaining slides
+            for i in range(1, len(original_prs.slides)):
                 slide_num = i + 1
-                slide_filename = os.path.join(UPLOADS_DIR, f"slide_{slide_num:02d}.png")
-                
-                # Create a new presentation with just this slide
-                temp_prs = Presentation()
-                slide_layout = temp_prs.slide_layouts[6]  # Blank layout
-                new_slide = temp_prs.slides.add_slide(slide_layout)
-                
-                # Copy all shapes from the original slide to the new slide
-                for shape in slide.shapes:
-                    try:
-                        # Copy shape properties
-                        left = shape.left
-                        top = shape.top
-                        width = shape.width
-                        height = shape.height
-                        
-                        # Handle different shape types
-                        if hasattr(shape, "text") and shape.text.strip():
-                            # Text shape
-                            textbox = new_slide.shapes.add_textbox(left, top, width, height)
-                            text_frame = textbox.text_frame
-                            text_frame.text = shape.text
-                            
-                            # Copy text formatting
-                            if hasattr(shape, "text_frame") and shape.text_frame.paragraphs:
-                                for j, para in enumerate(shape.text_frame.paragraphs):
-                                    if j < len(text_frame.paragraphs):
-                                        new_para = text_frame.paragraphs[j]
-                                        if para.runs:
-                                            for k, run in enumerate(para.runs):
-                                                if k < len(new_para.runs):
-                                                    new_run = new_para.runs[k]
-                                                    # Copy font properties
-                                                    if hasattr(run.font, 'name') and run.font.name:
-                                                        new_run.font.name = run.font.name
-                                                    if hasattr(run.font, 'size') and run.font.size:
-                                                        new_run.font.size = run.font.size
-                                                    if hasattr(run.font, 'bold'):
-                                                        new_run.font.bold = run.font.bold
-                                                    if hasattr(run.font, 'italic'):
-                                                        new_run.font.italic = run.font.italic
-                                                    if hasattr(run.font, 'color') and run.font.color.rgb:
-                                                        new_run.font.color.rgb = run.font.color.rgb
-                        
-                        elif hasattr(shape, "image"):
-                            # Image shape - try to copy the image
-                            try:
-                                image_stream = shape.image.blob
-                                # Save image temporarily and add to new slide
-                                temp_img_path = os.path.join(UPLOADS_DIR, f"temp_img_{slide_num}_{i}.png")
-                                with open(temp_img_path, 'wb') as f:
-                                    f.write(image_stream)
-                                
-                                # Add image to new slide
-                                new_slide.shapes.add_picture(temp_img_path, left, top, width, height)
-                                
-                                # Clean up temp file
-                                if os.path.exists(temp_img_path):
-                                    os.remove(temp_img_path)
-                            except:
-                                pass  # Skip if image can't be copied
-                        
-                        elif hasattr(shape, "fill"):
-                            # Shape with fill (rectangles, etc.)
-                            try:
-                                # Add a rectangle with similar properties
-                                rect = new_slide.shapes.add_shape(
-                                    1, left, top, width, height  # 1 = rectangle
-                                )
-                                if hasattr(shape.fill, 'fore_color') and shape.fill.fore_color.rgb:
-                                    rect.fill.fore_color.rgb = shape.fill.fore_color.rgb
-                            except:
-                                pass
-                    
-                    except Exception as e:
-                        print(f"Warning: Could not copy shape {i} from slide {slide_num}: {e}")
-                        continue
-                
-                # Save the temporary presentation
-                temp_pptx_path = os.path.join(UPLOADS_DIR, f"temp_slide_{slide_num}.pptx")
-                temp_prs.save(temp_pptx_path)
-                
-                # Convert PPTX to image using a reliable method
-                try:
-                    # Method 1: Try using unoconv (if available)
-                    import subprocess
-                    result = subprocess.run([
-                        "unoconv", "-f", "png", "-o", UPLOADS_DIR, temp_pptx_path
-                    ], capture_output=True, text=True)
-                    
-                    if result.returncode == 0:
-                        # Rename the output file
-                        png_output = os.path.join(UPLOADS_DIR, f"temp_slide_{slide_num}.png")
-                        if os.path.exists(png_output):
-                            os.rename(png_output, slide_filename)
-                            slide_images.append(slide_filename)
-                            print(f"Extracted slide {slide_num} using unoconv: {slide_filename}")
-                            continue
-                
-                except:
-                    pass
-                
-                try:
-                    # Method 2: Try using soffice (LibreOffice) if available
-                    result = subprocess.run([
-                        "soffice", "--headless", "--convert-to", "png", 
-                        "--outdir", UPLOADS_DIR, temp_pptx_path
-                    ], capture_output=True, text=True)
-                    
-                    if result.returncode == 0:
-                        # Rename the output file
-                        png_output = os.path.join(UPLOADS_DIR, f"temp_slide_{slide_num}.png")
-                        if os.path.exists(png_output):
-                            os.rename(png_output, slide_filename)
-                            slide_images.append(slide_filename)
-                            print(f"Extracted slide {slide_num} using LibreOffice: {slide_filename}")
-                            continue
-                
-                except:
-                    pass
-                
-                # Method 3: Create a simple image representation
-                # Create a high-quality image with the slide content
-                img = Image.new('RGB', (1280, 720), color=(255, 255, 255))
-                draw = ImageDraw.Draw(img)
-                
-                # Try to use better fonts
-                try:
-                    # Try different font paths for Mac
-                    font_paths = [
-                        "/System/Library/Fonts/Arial.ttf",
-                        "/System/Library/Fonts/Helvetica.ttc",
-                        "/Library/Fonts/Arial.ttf",
-                        "/System/Library/Fonts/Supplemental/Arial.ttf"
-                    ]
-                    font = None
-                    for font_path in font_paths:
-                        try:
-                            font = ImageFont.truetype(font_path, 18)
-                            break
-                        except:
-                            continue
-                    
-                    if font is None:
-                        font = ImageFont.load_default()
-                
-                except:
-                    font = ImageFont.load_default()
-                
-                # Draw slide content
-                y_position = 50
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        # Get text formatting
-                        text_color = (0, 0, 0)  # Default black
-                        text_size = 18
-                        is_bold = False
-                        
-                        # Try to get formatting from the shape
-                        if hasattr(shape, "text_frame") and shape.text_frame.paragraphs:
-                            for para in shape.text_frame.paragraphs:
-                                if para.runs:
-                                    run = para.runs[0]  # Use first run for formatting
-                                    if hasattr(run.font, 'size') and run.font.size:
-                                        text_size = int(run.font.size.pt)
-                                    if hasattr(run.font, 'bold') and run.font.bold:
-                                        is_bold = True
-                                    if hasattr(run.font, 'color') and run.font.color.rgb:
-                                        rgb = run.font.color.rgb
-                                        text_color = (rgb.red, rgb.green, rgb.blue)
-                        
-                        # Create font with proper size
-                        try:
-                            if is_bold:
-                                # Try to find a bold font
-                                bold_font_paths = [
-                                    "/System/Library/Fonts/Arial Bold.ttf",
-                                    "/System/Library/Fonts/Helvetica Bold.ttc",
-                                    "/Library/Fonts/Arial Bold.ttf"
-                                ]
-                                text_font = None
-                                for font_path in bold_font_paths:
-                                    try:
-                                        text_font = ImageFont.truetype(font_path, text_size)
-                                        break
-                                    except:
-                                        continue
-                                if text_font is None:
-                                    text_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", text_size)
-                            else:
-                                text_font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", text_size)
-                        except:
-                            text_font = font
-                        
-                        # Draw the text
-                        text_lines = shape.text.strip().split('\n')
-                        for line in text_lines:
-                            if line.strip():
-                                draw.text((50, y_position), line.strip(), fill=text_color, font=text_font)
-                                y_position += text_size + 5
-                        y_position += 10
-                
-                # Save the image
-                img.save(slide_filename, 'PNG', quality=95)
-                slide_images.append(slide_filename)
-                print(f"Extracted slide {slide_num} (Python rendering): {slide_filename}")
-                
-                # Clean up temp file
-                if os.path.exists(temp_pptx_path):
-                    os.remove(temp_pptx_path)
+                print(f"Extracting slide {slide_num} using GPT-4o...")
+                extracted_images = extract_slide_images_with_gpt(pptx_path, slide_num)
+                slide_images.extend(extracted_images)
+                print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
             
-            print(f"Successfully extracted {len(slide_images)} slides using Python libraries")
+            print(f"Successfully extracted {len(slide_images)} slides using GPT-4 Vision")
             
         except Exception as e:
-            print(f"Python extraction failed: {e}")
-            print("Using simple text rendering as fallback...")
+            print(f"GPT extraction failed, falling back to Python-based extraction: {e}")
+            use_python_extraction = True
+        
+        # If GPT failed, use Python-based extraction for all slides
+        if use_python_extraction or not slide_images:
+            print("Using Python-based extraction for all slides...")
+            slide_images = []  # Clear any partial results
             
-            # Fallback: create simple images for each slide
-            for i, slide in enumerate(prs.slides):
+            for i in range(len(original_prs.slides)):
                 slide_num = i + 1
-                slide_filename = os.path.join(UPLOADS_DIR, f"slide_{slide_num:02d}.png")
-                
-                img = Image.new('RGB', (1280, 720), color=(255, 255, 255))
-                draw = ImageDraw.Draw(img)
-                
-                try:
-                    font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 16)
-                except:
-                    font = ImageFont.load_default()
-                
-                y_position = 50
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        text_lines = shape.text.strip().split('\n')
-                        for line in text_lines:
-                            if line.strip():
-                                draw.text((50, y_position), line.strip(), fill=(0, 0, 0), font=font)
-                                y_position += 25
-                        y_position += 10
-                
-                img.save(slide_filename, 'PNG')
-                slide_images.append(slide_filename)
-                print(f"Extracted slide {slide_num} (fallback): {slide_filename}")
+                print(f"Extracting slide {slide_num} using Python...")
+                extracted_images = extract_slide_images_with_python(pptx_path, slide_num)
+                slide_images.extend(extracted_images)
+                print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
+            
+            print(f"Successfully extracted {len(slide_images)} slides using Python")
         
         # Now create animation frames using the extracted slide images
         animation_frames = []

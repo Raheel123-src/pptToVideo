@@ -8,4 +8,5 @@ Pillow
 python-dotenv
 openai 
 whisper
-pydub 
+pydub
+python-pptx 

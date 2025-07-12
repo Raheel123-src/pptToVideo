@@ -6,4 +6,7 @@ python-dotenv
 openai
 whisper
 python-pptx
-boto3 
+boto3
+PyMuPDF
+pdfminer.six
+pytesseract 

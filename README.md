@@ -62,6 +62,7 @@ uvicorn api:app --reload
 
 ## Troubleshooting
 
-- **Python 3.13 compatibility**: The code uses Python 3.12 for compatibility with audio processing libraries
+- **Python 3.12**: Explicitly configured for compatibility with all dependencies
 - **Font issues**: Cross-platform font paths are included for Linux deployment
-- **ffmpeg missing**: The build script automatically installs ffmpeg on Render 
+- **System dependencies**: ffmpeg and tesseract-ocr are automatically installed on Render
+- **Missing modules**: All required Python packages are included in requirements.txt 

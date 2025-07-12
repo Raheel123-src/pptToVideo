@@ -5,7 +5,10 @@
 apt-get update
 
 # Install ffmpeg and other required system dependencies
-apt-get install -y ffmpeg
+apt-get install -y ffmpeg tesseract-ocr
+
+# Upgrade pip
+pip install --upgrade pip
 
 # Install Python dependencies
 pip install -r requirements.txt

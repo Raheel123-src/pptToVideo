@@ -4,7 +4,8 @@ services:
     env: python
     pythonVersion: "3.12"
     buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
+      apt-get update && apt-get install -y ffmpeg tesseract-ocr
+      pip install --upgrade pip
       pip install -r requirements.txt
     startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
     envVars:

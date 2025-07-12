@@ -14,6 +14,10 @@ import whisper
 import openai
 from pdf_to_img_and_text import extract_text_openai
 from pptx import Presentation
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
+import uuid
+from datetime import datetime, timedelta
 
 load_dotenv()
 UPLOADS_DIR = os.getenv('UPLOADS_DIR', 'uploads')
@@ -55,71 +59,146 @@ def extract_slide_images_with_python(pptx_path, slide_num):
             except:
                 font = ImageFont.load_default()
         
-        # Process each shape in the slide
+        # Collect all shapes for proper animation states
+        text_shapes = []
+        image_shapes = []
+        other_shapes = []
+        
         for shape in slide.shapes:
             try:
-                # Handle text shapes
-                if hasattr(shape, 'text') and getattr(shape, 'text', '').strip():
-                    # Get shape position and size
-                    left = int(shape.left * 96 / 914400)
-                    top = int(shape.top * 96 / 914400)
-                    width = int(shape.width * 96 / 914400)
-                    height = int(shape.height * 96 / 914400)
-                    
-                    # Draw text
-                    draw.text((left, top), getattr(shape, 'text', ''), fill=(0, 0, 0), font=font)
+                # Get shape position and size
+                left = int(shape.left * 96 / 914400)
+                top = int(shape.top * 96 / 914400)
+                width = int(shape.width * 96 / 914400)
+                height = int(shape.height * 96 / 914400)
                 
-                # Handle image shapes
+                # Categorize shapes
+                if hasattr(shape, 'text') and getattr(shape, 'text', '').strip():
+                    text_shapes.append({
+                        'text': getattr(shape, 'text', ''),
+                        'left': left,
+                        'top': top,
+                        'width': width,
+                        'height': height,
+                        'shape': shape
+                    })
                 elif hasattr(shape, 'image'):
                     try:
-                        # Get image data
                         image_stream = getattr(shape, 'image').blob
                         image_data = Image.open(io.BytesIO(image_stream))
-                        
-                        # Get position and size
-                        left = int(shape.left * 96 / 914400)
-                        top = int(shape.top * 96 / 914400)
-                        width = int(shape.width * 96 / 914400)
-                        height = int(shape.height * 96 / 914400)
-                        
-                        # Resize and paste image
-                        image_data = image_data.resize((width, height))
-                        img.paste(image_data, (left, top))
+                        image_shapes.append({
+                            'image': image_data,
+                            'left': left,
+                            'top': top,
+                            'width': width,
+                            'height': height
+                        })
                     except Exception as e:
                         print(f"Warning: Could not process image shape: {e}")
                         continue
-                
-                # Handle other shapes (rectangles, etc.)
                 elif hasattr(shape, 'shape_type'):
-                    try:
-                        left = int(shape.left * 96 / 914400)
-                        top = int(shape.top * 96 / 914400)
-                        width = int(shape.width * 96 / 914400)
-                        height = int(shape.height * 96 / 914400)
-                        
-                        # Draw a simple rectangle
-                        draw.rectangle([left, top, left + width, top + height], 
-                                     outline=(0, 0, 0), fill=(240, 240, 240))
-                    except Exception as e:
-                        print(f"Warning: Could not process shape: {e}")
-                        continue
+                    other_shapes.append({
+                        'left': left,
+                        'top': top,
+                        'width': width,
+                        'height': height,
+                        'shape_type': getattr(shape, 'shape_type', None)
+                    })
                         
             except Exception as e:
                 print(f"Warning: Could not process shape: {e}")
                 continue
         
-        # Save the image
-        filename = f"slide_{slide_num}_python.png"
-        filepath = os.path.join(UPLOADS_DIR, filename)
-        img.save(filepath, 'PNG')
+        # Create BEFORE animation state (images only, no text)
+        img_before = Image.new('RGB', (slide_width, slide_height), color=0xFFFFFF)
+        draw_before = ImageDraw.Draw(img_before)
         
-        print(f"Extracted slide {slide_num} using Python: {filepath}")
-        return [filepath]
+        # Add images to before state
+        for img_shape in image_shapes:
+            try:
+                resized_img = img_shape['image'].resize((img_shape['width'], img_shape['height']))
+                img_before.paste(resized_img, (img_shape['left'], img_shape['top']))
+            except Exception as e:
+                print(f"Warning: Could not paste image in before state: {e}")
+        
+        # Add other shapes to before state
+        for shape in other_shapes:
+            try:
+                draw_before.rectangle([shape['left'], shape['top'], 
+                                     shape['left'] + shape['width'], 
+                                     shape['top'] + shape['height']], 
+                                    outline=(0, 0, 0), fill=(240, 240, 240))
+            except Exception as e:
+                print(f"Warning: Could not draw shape in before state: {e}")
+        
+        # Create AFTER animation state (images + text)
+        img_after = Image.new('RGB', (slide_width, slide_height), color=0xFFFFFF)
+        draw_after = ImageDraw.Draw(img_after)
+        
+        # Add images to after state
+        for img_shape in image_shapes:
+            try:
+                resized_img = img_shape['image'].resize((img_shape['width'], img_shape['height']))
+                img_after.paste(resized_img, (img_shape['left'], img_shape['top']))
+            except Exception as e:
+                print(f"Warning: Could not paste image in after state: {e}")
+        
+        # Add other shapes to after state
+        for shape in other_shapes:
+            try:
+                draw_after.rectangle([shape['left'], shape['top'], 
+                                    shape['left'] + shape['width'], 
+                                    shape['top'] + shape['height']], 
+                                   outline=(0, 0, 0), fill=(240, 240, 240))
+            except Exception as e:
+                print(f"Warning: Could not draw shape in after state: {e}")
+        
+        # Add text to after state only
+        for text_shape in text_shapes:
+            try:
+                # Try to get font properties from the original shape
+                font_to_use = font  # Default font
+                
+                # Try to extract font properties if available
+                if hasattr(text_shape['shape'], 'text_frame') and text_shape['shape'].text_frame.paragraphs:
+                    try:
+                        para = text_shape['shape'].text_frame.paragraphs[0]
+                        if para.runs:
+                            run = para.runs[0]
+                            if hasattr(run.font, 'size') and run.font.size:
+                                font_size = int(run.font.size.pt)
+                                try:
+                                    font_to_use = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", font_size)
+                                except:
+                                    font_to_use = ImageFont.load_default()
+                    except:
+                        pass
+                
+                draw_after.text((text_shape['left'], text_shape['top']), 
+                              text_shape['text'], fill=(0, 0, 0), font=font_to_use)
+            except Exception as e:
+                print(f"Warning: Could not draw text in after state: {e}")
+                # Fallback to default font
+                draw_after.text((text_shape['left'], text_shape['top']), 
+                              text_shape['text'], fill=(0, 0, 0), font=font)
+        
+        # Save the base image (before animations)
+        filename_before = f"slide_{slide_num:02d}_before.png"
+        filepath_before = os.path.join(UPLOADS_DIR, filename_before)
+        img.save(filepath_before, 'PNG')
+        
+        # Create after animation state (same as before for Python extraction)
+        filename_after = f"slide_{slide_num:02d}_after.png"
+        filepath_after = os.path.join(UPLOADS_DIR, filename_after)
+        img.save(filepath_after, 'PNG')
+        
+        print(f"Extracted slide {slide_num} using Python: {filepath_before}, {filepath_after}")
+        return [filepath_before, filepath_after]
         
     except Exception as e:
         raise Exception(f"Python-based extraction failed for slide {slide_num}: {e}")
 
-def extract_slide_images_with_gpt(pptx_path, slide_num):
+def extract_slide_images_with_gpt(pptx_path, slide_num, use_gpt4o_mini=False):
     """
     Use GPT-4o to extract actual rendered slide images from PowerPoint file.
     This preserves all fonts, images, and formatting exactly as they appear.
@@ -176,9 +255,13 @@ def extract_slide_images_with_gpt(pptx_path, slide_num):
     """
     
     try:
-        # Call GPT-4o to extract the actual slide images
+        # Choose model based on preference
+        model = "gpt-4o-mini" if use_gpt4o_mini else "gpt-4o"
+        print(f"Using {model} for slide {slide_num}")
+        
+        # Call GPT to extract the actual slide images
         response = openai.chat.completions.create(
-            model="gpt-4o",
+            model=model,
             messages=[
                 {"role": "system", "content": "You are an expert PowerPoint slide image extractor. Your job is to extract actual rendered images from PowerPoint files with perfect accuracy, preserving all fonts, images, and formatting exactly as they appear in PowerPoint."},
                 {"role": "user", "content": gpt_prompt}
@@ -300,6 +383,66 @@ def validate_pptx_file_size(pptx_path):
                 "max_size_mb": 25
             }
         )
+
+def upload_to_s3(file_path, bucket_name=None, folder="videos"):
+    """
+    Upload a file to S3 and return a downloadable URL.
+    
+    Args:
+        file_path: Path to the file to upload
+        bucket_name: S3 bucket name (optional, uses env var if not provided)
+        folder: Folder within the bucket to upload to
+    
+    Returns:
+        dict: Contains 'url' (downloadable link) and 'key' (S3 object key)
+    """
+    try:
+        # Get S3 configuration from environment variables
+        bucket_name = bucket_name or os.getenv('S3_BUCKET_NAME')
+        aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        aws_region = os.getenv('AWS_REGION', 'us-east-1')
+        
+        if not bucket_name or not aws_access_key_id or not aws_secret_access_key:
+            raise Exception("S3 configuration not found in environment variables")
+        
+        # Create S3 client
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
+            region_name=aws_region
+        )
+        
+        # Generate unique filename
+        file_extension = os.path.splitext(file_path)[1]
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        s3_key = f"{folder}/{unique_filename}"
+        
+        # Upload file to S3
+        print(f"Uploading {file_path} to S3 bucket {bucket_name} with key {s3_key}")
+        s3_client.upload_file(file_path, bucket_name, s3_key)
+        
+        # Generate presigned URL for download (expires in 24 hours)
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': s3_key},
+            ExpiresIn=86400  # 24 hours
+        )
+        
+        return {
+            'url': presigned_url,
+            'key': s3_key,
+            'bucket': bucket_name,
+            'filename': unique_filename
+        }
+        
+    except NoCredentialsError:
+        raise Exception("AWS credentials not found")
+    except ClientError as e:
+        raise Exception(f"S3 upload failed: {str(e)}")
+    except Exception as e:
+        raise Exception(f"Upload failed: {str(e)}")
 
 app = FastAPI()
 
@@ -646,7 +789,34 @@ async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File
         sequence_filename = os.path.join(UPLOADS_DIR, "slide_sequence_info.json")
         with open(sequence_filename, 'w', encoding='utf-8') as f:
             json.dump(sequence_info, f, ensure_ascii=False, indent=2)
-        return JSONResponse({"message": f"Processed PDF and audio. Text, images, and video saved to '{UPLOADS_DIR}'."})
+        
+        # Upload final video to S3 and get downloadable link
+        try:
+            s3_result = upload_to_s3(final_video_path, folder="pdf-videos")
+            return JSONResponse({
+                "message": "Successfully processed PDF and audio!",
+                "video_download_url": s3_result['url'],
+                "video_filename": s3_result['filename'],
+                "details": {
+                    "total_slides": len(slide_sequence),
+                    "audio_duration": audio_duration,
+                    "video_path": final_video_path,
+                    "s3_key": s3_result['key']
+                }
+            })
+        except Exception as s3_error:
+            print(f"S3 upload failed: {s3_error}")
+            # Return local path if S3 upload fails
+            return JSONResponse({
+                "message": f"Processed PDF and audio. Video saved locally to '{final_video_path}'",
+                "video_download_url": None,
+                "local_video_path": final_video_path,
+                "s3_error": str(s3_error),
+                "details": {
+                    "total_slides": len(slide_sequence),
+                    "audio_duration": audio_duration
+                }
+            })
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -879,67 +1049,153 @@ async def upload_ppt_audio_animate(ppt: UploadFile = File(...), audio: UploadFil
         # Try GPT extraction first, fall back to Python if file is too large
         use_python_extraction = False
         
-        try:
-            # Try to extract the first slide with GPT to test if it works
-            print("Testing GPT extraction with first slide...")
-            test_images = extract_slide_images_with_gpt(pptx_path, 1)
-            slide_images.extend(test_images)
-            print(f"GPT extraction successful for slide 1, continuing with GPT...")
-            
-            # If first slide worked, continue with GPT for remaining slides
-            for i in range(1, len(original_prs.slides)):
-                slide_num = i + 1
-                print(f"Extracting slide {slide_num} using GPT-4o...")
-                extracted_images = extract_slide_images_with_gpt(pptx_path, slide_num)
-                slide_images.extend(extracted_images)
-                print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
-            
-            print(f"Successfully extracted {len(slide_images)} slides using GPT-4 Vision")
-            
-        except Exception as e:
-            print(f"GPT extraction failed, falling back to Python-based extraction: {e}")
-            use_python_extraction = True
+        # Try different models and fallback strategies
+        slide_images = []
         
-        # If GPT failed, use Python-based extraction for all slides
-        if use_python_extraction or not slide_images:
-            print("Using Python-based extraction for all slides...")
-            slide_images = []  # Clear any partial results
-            
+        # Strategy 1: Try GPT-4o-mini first (lower token usage)
+        try:
+            print("Trying GPT-4o-mini for all slides...")
             for i in range(len(original_prs.slides)):
                 slide_num = i + 1
-                print(f"Extracting slide {slide_num} using Python...")
-                extracted_images = extract_slide_images_with_python(pptx_path, slide_num)
+                print(f"Extracting slide {slide_num} using GPT-4o-mini...")
+                extracted_images = extract_slide_images_with_gpt(pptx_path, slide_num, use_gpt4o_mini=True)
                 slide_images.extend(extracted_images)
                 print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
             
-            print(f"Successfully extracted {len(slide_images)} slides using Python")
+            print(f"Successfully extracted {len(slide_images)} slides using GPT-4o-mini")
+            
+        except Exception as e:
+            print(f"GPT-4o-mini failed: {e}")
+            
+            # Strategy 2: Try GPT-4o if mini failed
+            try:
+                print("Trying GPT-4o for all slides...")
+                slide_images = []  # Clear previous results
+                
+                for i in range(len(original_prs.slides)):
+                    slide_num = i + 1
+                    print(f"Extracting slide {slide_num} using GPT-4o...")
+                    extracted_images = extract_slide_images_with_gpt(pptx_path, slide_num, use_gpt4o_mini=False)
+                    slide_images.extend(extracted_images)
+                    print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
+                
+                print(f"Successfully extracted {len(slide_images)} slides using GPT-4o")
+                
+            except Exception as e2:
+                print(f"GPT-4o also failed: {e2}")
+                
+                # Strategy 3: Fall back to Python-based extraction
+                print("Falling back to Python-based extraction for all slides...")
+                slide_images = []  # Clear previous results
+                
+                for i in range(len(original_prs.slides)):
+                    slide_num = i + 1
+                    print(f"Extracting slide {slide_num} using Python...")
+                    extracted_images = extract_slide_images_with_python(pptx_path, slide_num)
+                    slide_images.extend(extracted_images)
+                    print(f"Successfully extracted {len(extracted_images)} images for slide {slide_num}")
+                
+                print(f"Successfully extracted {len(slide_images)} slides using Python")
         
-        # Now create animation frames using the extracted slide images
+        # Now create animation frames using the extracted slide images with proper transitions
         animation_frames = []
+        
+        # Organize slide images by slide number and state
+        slide_states = {}
+        for img_path in slide_images:
+            filename = os.path.basename(img_path)
+            if filename.startswith('slide_') and filename.endswith('.png'):
+                # Parse filename to get slide number and state
+                parts = filename.replace('.png', '').split('_')
+                if len(parts) >= 3:
+                    slide_num = int(parts[1])
+                    state = parts[2] if len(parts) > 2 else 'before'
+                    
+                    if slide_num not in slide_states:
+                        slide_states[slide_num] = {}
+                    slide_states[slide_num][state] = img_path
         
         for i, step in enumerate(animation_plan):
             slide_num = step['slide_number']
+            transition_type = step.get('transition_type', 'same_slide')
             
-            # Use the corresponding slide image
-            slide_idx = slide_num - 1
-            if slide_idx < len(slide_images):
-                # Copy the slide image for this frame
-                slide_image_path = slide_images[slide_idx]
-                frame_filename = os.path.join(UPLOADS_DIR, f"anim_frame_{i+1:04d}.png")
+            # Check if we need to create a transition from before to after
+            if (transition_type == 'element_reveal' and 
+                slide_num in slide_states and 
+                'before' in slide_states[slide_num] and 
+                'after' in slide_states[slide_num]):
                 
-                # Copy the slide image to the frame
-                import shutil
-                shutil.copy2(slide_image_path, frame_filename)
-                animation_frames.append(frame_filename)
+                # Create smooth transition: before -> after
+                before_path = slide_states[slide_num]['before']
+                after_path = slide_states[slide_num]['after']
                 
-                print(f"Created frame {i+1}: Using slide {slide_num} image")
-            else:
-                # Fallback if slide doesn't exist
-                print(f"Warning: Slide {slide_num} not found, using slide 1")
-                if slide_images:
+                # Create transition frame (blend between before and after)
+                try:
+                    from PIL import Image, ImageEnhance
+                    
+                    # Load both images
+                    before_img = Image.open(before_path)
+                    after_img = Image.open(after_path)
+                    
+                    # Ensure same size
+                    if before_img.size != after_img.size:
+                        after_img = after_img.resize(before_img.size)
+                    
+                    # Create transition frame (70% after, 30% before for smooth reveal)
+                    transition_img = Image.blend(before_img, after_img, 0.7)
+                    
+                    # Save transition frame
                     frame_filename = os.path.join(UPLOADS_DIR, f"anim_frame_{i+1:04d}.png")
-                    shutil.copy2(slide_images[0], frame_filename)
+                    transition_img.save(frame_filename, 'PNG')
                     animation_frames.append(frame_filename)
+                    
+                    print(f"Created frame {i+1}: Transition from slide {slide_num} before to after")
+                    
+                except Exception as e:
+                    print(f"Warning: Could not create transition frame: {e}")
+                    # Fallback to after state
+                    frame_filename = os.path.join(UPLOADS_DIR, f"anim_frame_{i+1:04d}.png")
+                    import shutil
+                    shutil.copy2(after_path, frame_filename)
+                    animation_frames.append(frame_filename)
+                    print(f"Created frame {i+1}: Using slide {slide_num} after state (fallback)")
+            
+            else:
+                # Determine which state to use based on transition type
+                if transition_type == 'new_slide' or i == 0:
+                    # Use before state for new slides
+                    state_to_use = 'before'
+                elif transition_type == 'element_reveal':
+                    # Use after state for element reveals
+                    state_to_use = 'after'
+                else:
+                    # Use after state for same slide
+                    state_to_use = 'after'
+                
+                # Get the appropriate slide image
+                if slide_num in slide_states and state_to_use in slide_states[slide_num]:
+                    slide_image_path = slide_states[slide_num][state_to_use]
+                    frame_filename = os.path.join(UPLOADS_DIR, f"anim_frame_{i+1:04d}.png")
+                    
+                    # Copy the slide image to the frame
+                    import shutil
+                    shutil.copy2(slide_image_path, frame_filename)
+                    animation_frames.append(frame_filename)
+                    
+                    print(f"Created frame {i+1}: Using slide {slide_num} {state_to_use} state")
+                else:
+                    # Fallback if slide state doesn't exist
+                    print(f"Warning: Slide {slide_num} {state_to_use} state not found")
+                    if slide_states:
+                        # Use any available slide state
+                        first_slide = list(slide_states.keys())[0]
+                        first_state = list(slide_states[first_slide].keys())[0]
+                        fallback_path = slide_states[first_slide][first_state]
+                        
+                        frame_filename = os.path.join(UPLOADS_DIR, f"anim_frame_{i+1:04d}.png")
+                        shutil.copy2(fallback_path, frame_filename)
+                        animation_frames.append(frame_filename)
+                        print(f"Created frame {i+1}: Using fallback slide {first_slide} {first_state} state")
         
         # Create video from animation frames
         if not animation_frames:

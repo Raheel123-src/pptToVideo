@@ -9,4 +9,5 @@ python-dotenv
 openai 
 whisper
 pydub
-python-pptx 
+python-pptx
+boto3 

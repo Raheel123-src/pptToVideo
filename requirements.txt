@@ -9,4 +9,5 @@ python-pptx
 boto3
 PyMuPDF
 pdfminer.six
-pytesseract 
+pytesseract
+python-multipart 

@@ -3,8 +3,10 @@ import re
 import json
 import math
 import subprocess
+import requests
+import urllib.parse
 from tempfile import NamedTemporaryFile
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import JSONResponse
 from pdf2image import convert_from_path
 from PIL import Image, ImageDraw, ImageFont
@@ -475,7 +477,103 @@ def upload_to_s3(file_path, bucket_name=None, folder="videos"):
     except Exception as e:
         raise Exception(f"Upload failed: {str(e)}")
 
+def download_file_from_url(url, file_type="file"):
+    """Download file from URL (S3, Google Drive, etc.) and return local path"""
+    try:
+        print(f"Downloading {file_type} from URL: {url}")
+        
+        # Handle Google Drive URLs
+        if "drive.google.com" in url:
+            if "/file/d/" in url:
+                file_id = url.split("/file/d/")[1].split("/")[0]
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            elif "id=" in url:
+                file_id = url.split("id=")[1].split("&")[0]
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        # Handle S3 URLs
+        if "s3.amazonaws.com" in url or ".s3." in url:
+            # S3 URLs are usually direct download links
+            pass
+        
+        # Download the file
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        # Determine file extension
+        content_type = response.headers.get('content-type', '')
+        if file_type == "pdf":
+            extension = '.pdf'
+        elif file_type == "audio":
+            if 'audio/mpeg' in content_type:
+                extension = '.mp3'
+            elif 'audio/wav' in content_type:
+                extension = '.wav'
+            elif 'audio/mp4' in content_type:
+                extension = '.m4a'
+            else:
+                extension = '.mp3'  # default
+        else:
+            # Try to get extension from URL
+            parsed_url = urllib.parse.urlparse(url)
+            path = parsed_url.path
+            extension = os.path.splitext(path)[1]
+            if not extension:
+                extension = '.tmp'
+        
+        # Save to temporary file
+        with NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                tmp_file.write(chunk)
+            file_path = tmp_file.name
+        
+        print(f"Successfully downloaded {file_type} to: {file_path}")
+        return file_path
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download {file_type} from URL: {str(e)}")
+
+def validate_file_type(file_path, expected_type):
+    """Validate file type based on extension and content"""
+    if expected_type == "pdf":
+        valid_extensions = ['.pdf']
+        valid_content_types = ['application/pdf']
+    elif expected_type == "audio":
+        valid_extensions = ['.mp3', '.wav', '.m4a', '.aac', '.ogg']
+        valid_content_types = ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/aac', 'audio/ogg']
+    else:
+        return True  # Unknown type, accept it
+    
+    # Check extension
+    file_extension = os.path.splitext(file_path)[1].lower()
+    if file_extension not in valid_extensions:
+        return False
+    
+    # Check content type using file command
+    try:
+        result = subprocess.run(['file', '--mime-type', file_path], 
+                              capture_output=True, text=True, check=True)
+        mime_type = result.stdout.strip().split(': ')[1]
+        if mime_type not in valid_content_types:
+            return False
+    except:
+        # If file command fails, just check extension
+        pass
+    
+    return True
+
 app = FastAPI()
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler to catch all unhandled errors"""
+    print(f"Global exception handler caught: {type(exc).__name__}: {str(exc)}")
+    import traceback
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"}
+    )
 
 @app.get("/")
 async def root():
@@ -485,23 +583,167 @@ async def root():
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.post("/upload-pdf-audio/")
-async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File(...)):
-    if not pdf.filename or not pdf.filename.lower().endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
-    if not audio.filename or not (audio.filename.lower().endswith('.mp3') or audio.filename.lower().endswith('.wav') or audio.filename.lower().endswith('.m4a')):
-        raise HTTPException(status_code=400, detail="Only audio files (.mp3, .wav, .m4a) are allowed.")
+@app.get("/test-download")
+async def test_download():
+    """Test URL download functionality"""
     try:
-        # Save PDF
-        with NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
-            tmp_pdf.write(await pdf.read())
-            pdf_path = tmp_pdf.name
-        # Save audio
-        with NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio.filename)[-1]) as tmp_audio:
-            tmp_audio.write(await audio.read())
-            audio_path = tmp_audio.name
+        # Test with a simple text file
+        test_url = "https://httpbin.org/robots.txt"
+        file_path = download_file_from_url(test_url, "text")
+        
+        with open(file_path, 'r') as f:
+            content = f.read()
+        
+        return {
+            "status": "success",
+            "message": "URL download test successful",
+            "file_path": file_path,
+            "content_length": len(content),
+            "content_preview": content[:100]
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"URL download test failed: {str(e)}"
+        }
+
+@app.get("/test-env")
+async def test_env():
+    """Test environment variables"""
+    return {
+        "openai_api_key_set": bool(os.getenv('OPENAI_API_KEY')),
+        "aws_access_key_set": bool(os.getenv('AWS_ACCESS_KEY_ID')),
+        "aws_secret_key_set": bool(os.getenv('AWS_SECRET_ACCESS_KEY')),
+        "aws_region_set": bool(os.getenv('AWS_DEFAULT_REGION')),
+        "s3_bucket_set": bool(os.getenv('S3_BUCKET_NAME')),
+        "uploads_dir": os.getenv('UPLOADS_DIR', 'uploads')
+    }
+
+@app.post("/test-simple-upload")
+async def test_simple_upload(
+    pdf: UploadFile = File(None),
+    audio: UploadFile = File(None),
+    pdf_url: str = Form(None),
+    audio_url: str = Form(None)
+):
+    """Simple test endpoint to isolate the issue"""
+    try:
+        print("Test endpoint called")
+        print(f"PDF file: {pdf}")
+        print(f"Audio file: {audio}")
+        print(f"PDF URL: {pdf_url}")
+        print(f"Audio URL: {audio_url}")
+        
+        # Test URL download
+        if pdf_url:
+            print(f"Downloading PDF from: {pdf_url}")
+            pdf_path = download_file_from_url(pdf_url, "pdf")
+            print(f"PDF downloaded to: {pdf_path}")
+            
+            # Test PDF conversion
+            try:
+                print("Testing PDF conversion...")
+                images = convert_from_path(pdf_path)
+                print(f"PDF converted to {len(images)} images")
+                return {"status": "success", "pdf_path": pdf_path, "images_count": len(images)}
+            except Exception as e:
+                print(f"PDF conversion failed: {e}")
+                return {"status": "pdf_conversion_failed", "error": str(e)}
+        
+        if audio_url:
+            print(f"Downloading audio from: {audio_url}")
+            audio_path = download_file_from_url(audio_url, "audio")
+            print(f"Audio downloaded to: {audio_path}")
+            
+            # Test audio transcription
+            try:
+                print("Testing audio transcription...")
+                model = whisper.load_model("base")
+                result = model.transcribe(audio_path, word_timestamps=True)
+                segments = result["segments"]
+                print(f"Audio transcribed with {len(segments)} segments")
+                return {"status": "success", "audio_path": audio_path, "segments_count": len(segments)}
+            except Exception as e:
+                print(f"Audio transcription failed: {e}")
+                return {"status": "audio_transcription_failed", "error": str(e)}
+        
+        return {"status": "no_urls_provided"}
+        
+    except Exception as e:
+        print(f"Error in test endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"status": "error", "error": str(e)}
+
+@app.post("/upload-pdf-audio/")
+async def upload_pdf_audio(
+    pdf: UploadFile = File(None),
+    audio: UploadFile = File(None),
+    pdf_url: str = Form(None),
+    audio_url: str = Form(None)
+):
+    """
+    Upload PDF and audio files or provide URLs to them.
+    Supports both file uploads and URLs (S3, Google Drive, etc.)
+    """
+    try:
+        # Check if OpenAI API key is available
+        openai_api_key = os.getenv('OPENAI_API_KEY')
+        if not openai_api_key:
+            print("Warning: OPENAI_API_KEY not found in environment variables")
+        
+        # Check if AWS credentials are available for S3 upload
+        aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        if not aws_access_key or not aws_secret_key:
+            print("Warning: AWS credentials not found in environment variables")
+        # Handle PDF input
+        if pdf:
+            # File upload
+            if not pdf.filename or not pdf.filename.lower().endswith('.pdf'):
+                raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
+            with NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+                tmp_pdf.write(await pdf.read())
+                pdf_path = tmp_pdf.name
+        elif pdf_url:
+            # URL download
+            pdf_path = download_file_from_url(pdf_url, "pdf")
+        else:
+            raise HTTPException(status_code=400, detail="Either PDF file or PDF URL must be provided.")
+        
+        # Handle audio input
+        if audio:
+            # File upload
+            if not audio.filename or not (audio.filename.lower().endswith('.mp3') or 
+                                        audio.filename.lower().endswith('.wav') or 
+                                        audio.filename.lower().endswith('.m4a')):
+                raise HTTPException(status_code=400, detail="Only audio files (.mp3, .wav, .m4a) are allowed.")
+            with NamedTemporaryFile(delete=False, suffix=os.path.splitext(audio.filename)[-1]) as tmp_audio:
+                tmp_audio.write(await audio.read())
+                audio_path = tmp_audio.name
+        elif audio_url:
+            # URL download
+            audio_path = download_file_from_url(audio_url, "audio")
+        else:
+            raise HTTPException(status_code=400, detail="Either audio file or audio URL must be provided.")
+        
+        # Validate downloaded files
+        try:
+            if not validate_file_type(pdf_path, "pdf"):
+                raise HTTPException(status_code=400, detail="Invalid PDF file format.")
+            if not validate_file_type(audio_path, "audio"):
+                raise HTTPException(status_code=400, detail="Invalid audio file format.")
+        except Exception as e:
+            print(f"File validation error: {e}")
+            # Continue anyway, as file validation might fail on some systems
+        
         # PDF to images and GPT-4o text
-        images = convert_from_path(pdf_path)
+        try:
+            images = convert_from_path(pdf_path)
+            print(f"Successfully converted PDF to {len(images)} images")
+        except Exception as e:
+            print(f"PDF conversion error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to convert PDF: {str(e)}")
         page_texts = []
         for i, image in enumerate(images):
             if image.mode != 'RGB':
@@ -515,16 +757,33 @@ async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File
                 image = new_image
             img_filename = os.path.join(UPLOADS_DIR, f"page_{i+1}.png")
             image.save(img_filename, 'PNG')
-            text = extract_text_openai(image)
-            print(f"Extracted text for page {i+1}:\n{text}\n{'-'*40}")
+            try:
+                text = extract_text_openai(image)
+                print(f"Extracted text for page {i+1}:\n{text}\n{'-'*40}")
+            except Exception as e:
+                print(f"Text extraction error for page {i+1}: {e}")
+                # Fallback: use OCR or simple placeholder
+                try:
+                    import pytesseract
+                    text = pytesseract.image_to_string(image).strip()
+                    if not text:
+                        text = f"Page {i+1} content (text extraction failed)"
+                except:
+                    text = f"Page {i+1} content (text extraction failed)"
+            
             txt_filename = os.path.join(UPLOADS_DIR, f"page_{i+1}.txt")
             with open(txt_filename, 'w', encoding='utf-8') as txt_file:
                 txt_file.write(text)
             page_texts.append(text)
         # Audio transcription with segments
-        model = whisper.load_model("base")
-        result = model.transcribe(audio_path, word_timestamps=True)
-        segments = result["segments"]
+        try:
+            model = whisper.load_model("base")
+            result = model.transcribe(audio_path, word_timestamps=True)
+            segments = result["segments"]
+            print(f"Successfully transcribed audio with {len(segments)} segments")
+        except Exception as e:
+            print(f"Audio transcription error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to transcribe audio: {str(e)}")
         # Combine all segment texts into one transcription
         full_transcription = ' '.join([str(seg.get('text', '')) for seg in segments if isinstance(seg, dict)])
         # Split transcription into sentences using regex

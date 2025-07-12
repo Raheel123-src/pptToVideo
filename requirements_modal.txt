@@ -1,5 +1,6 @@
+modal
 fastapi
-uvicorn
+uvicorn[standard]
 pdf2image
 Pillow
 python-dotenv
@@ -11,4 +12,5 @@ PyMuPDF
 pdfminer.six
 pytesseract
 python-multipart
-requests 
+requests
+psutil 

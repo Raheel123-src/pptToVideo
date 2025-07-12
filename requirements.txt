@@ -4,7 +4,7 @@ pdf2image
 Pillow
 python-dotenv
 openai
-whisper
+openai-whisper
 python-pptx
 boto3
 PyMuPDF

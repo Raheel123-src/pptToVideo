@@ -1,12 +1,9 @@
 fastapi
 uvicorn
-PyMuPDF
-pdfminer.six
 pdf2image
-pytesseract
 Pillow
 python-dotenv
-openai 
+openai
 whisper
 pydub
 python-pptx

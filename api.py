@@ -8,7 +8,6 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pdf2image import convert_from_path
 from PIL import Image, ImageDraw, ImageFont
-from pydub import AudioSegment
 from dotenv import load_dotenv
 import whisper
 import openai
@@ -22,6 +21,29 @@ from datetime import datetime, timedelta
 load_dotenv()
 UPLOADS_DIR = os.getenv('UPLOADS_DIR', 'uploads')
 os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+# Cross-platform font paths
+FONT_PATHS = [
+    "/System/Library/Fonts/Arial.ttf",  # macOS
+    "/System/Library/Fonts/Helvetica.ttc",  # macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
+    "/usr/share/fonts/TTF/arial.ttf",  # Linux
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Linux
+]
+
+def get_audio_duration(audio_path):
+    """Get audio duration using ffprobe (Python 3.13 compatible alternative to pydub)"""
+    try:
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration", 
+            "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+        ], capture_output=True, text=True, check=True)
+        duration = float(result.stdout.strip())
+        return duration
+    except (subprocess.CalledProcessError, ValueError) as e:
+        print(f"Warning: Could not get audio duration with ffprobe: {e}")
+        # Fallback: return a default duration
+        return 30.0  # 30 seconds default
 
 def extract_slide_images_with_python(pptx_path, slide_num):
     """Extract slide images using Python-based approach (fallback when GPT fails)."""
@@ -50,14 +72,17 @@ def extract_slide_images_with_python(pptx_path, slide_num):
         img = Image.new('RGB', (slide_width, slide_height), color=0xFFFFFF)
         draw = ImageDraw.Draw(img)
         
-        # Try to use a default font
-        try:
-            font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 24)
-        except:
+        # Try to use a default font (cross-platform)
+        font = None
+        for font_path in FONT_PATHS:
             try:
-                font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+                font = ImageFont.truetype(font_path, 24)
+                break
             except:
-                font = ImageFont.load_default()
+                continue
+        
+        if font is None:
+            font = ImageFont.load_default()
         
         # Collect all shapes for proper animation states
         text_shapes = []
@@ -167,9 +192,15 @@ def extract_slide_images_with_python(pptx_path, slide_num):
                             run = para.runs[0]
                             if hasattr(run.font, 'size') and run.font.size:
                                 font_size = int(run.font.size.pt)
-                                try:
-                                    font_to_use = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", font_size)
-                                except:
+                                # Try to use the same font with the extracted size
+                                font_to_use = None
+                                for font_path in FONT_PATHS:
+                                    try:
+                                        font_to_use = ImageFont.truetype(font_path, font_size)
+                                        break
+                                    except:
+                                        continue
+                                if font_to_use is None:
                                     font_to_use = ImageFont.load_default()
                     except:
                         pass
@@ -705,8 +736,7 @@ async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File
         print("Creating ONE single video with NO slide repetition...")
         
         # Get audio duration
-        audio = AudioSegment.from_file(audio_path)
-        audio_duration = len(audio) / 1000.0
+        audio_duration = get_audio_duration(audio_path)
         
         # Create optimal slide sequence with NO repetition
         # Use each page only once in the best order for content
@@ -1032,8 +1062,7 @@ async def upload_ppt_audio_animate(ppt: UploadFile = File(...), audio: UploadFil
             json.dump(animation_plan, f, ensure_ascii=False, indent=2)
         
         # Create animation frames based on the plan
-        audio = AudioSegment.from_file(audio_path)
-        audio_duration = len(audio) / 1000.0
+        audio_duration = get_audio_duration(audio_path)
         step_duration = audio_duration / len(animation_plan) if animation_plan else 1.0
         
         # Validate PowerPoint file size before processing

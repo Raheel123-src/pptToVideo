@@ -5,6 +5,5 @@ Pillow
 python-dotenv
 openai
 whisper
-pydub
 python-pptx
 boto3 

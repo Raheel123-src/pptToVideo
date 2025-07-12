@@ -477,6 +477,14 @@ def upload_to_s3(file_path, bucket_name=None, folder="videos"):
 
 app = FastAPI()
 
+@app.get("/")
+async def root():
+    return {"message": "PDF to Video API is running!"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
 @app.post("/upload-pdf-audio/")
 async def upload_pdf_audio(pdf: UploadFile = File(...), audio: UploadFile = File(...)):
     if not pdf.filename or not pdf.filename.lower().endswith('.pdf'):
